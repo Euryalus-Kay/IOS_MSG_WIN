@@ -13,7 +13,11 @@ const state = {
   contactMap: {},
   reactions: {},
   searchTimeout: null,
-  isConnected: false
+  isConnected: false,
+  loadingOlder: false,
+  hasMoreMessages: true,
+  messageOffset: 0,
+  MESSAGE_PAGE_SIZE: 500
 };
 
 // ─── DOM REFS ───
@@ -411,14 +415,21 @@ async function openConversation(conv) {
 
   messagesList.innerHTML = '<div style="display:flex;justify-content:center;padding:40px;"><div class="loading-spinner"></div></div>';
 
+  // Reset pagination state
+  state.messageOffset = 0;
+  state.hasMoreMessages = true;
+  state.loadingOlder = false;
+
   try {
     // Load messages and reactions in parallel
     const [messages, reactions] = await Promise.all([
-      apiFetch(`/api/conversations/${conv.chatId}/messages?limit=100`),
+      apiFetch(`/api/conversations/${conv.chatId}/messages?limit=${state.MESSAGE_PAGE_SIZE}`),
       apiFetch(`/api/conversations/${conv.chatId}/reactions`).catch(() => ({}))
     ]);
     state.messages = messages;
     state.reactions = reactions;
+    state.messageOffset = messages.length;
+    state.hasMoreMessages = messages.length >= state.MESSAGE_PAGE_SIZE;
     renderMessages(messages, conv.isGroup, reactions);
     scrollToBottom(false);
   } catch (err) {
@@ -668,6 +679,65 @@ function scrollToBottom(smooth = true) {
       behavior: smooth ? 'smooth' : 'instant'
     });
   });
+}
+
+// ─── LOAD OLDER MESSAGES (INFINITE SCROLL) ───
+async function loadOlderMessages() {
+  if (state.loadingOlder || !state.hasMoreMessages || !state.currentChat) return;
+
+  state.loadingOlder = true;
+
+  // Show loading indicator at the top
+  const loadingEl = document.createElement('div');
+  loadingEl.className = 'load-more-spinner';
+  loadingEl.innerHTML = '<div class="loading-spinner"></div>';
+  messagesList.prepend(loadingEl);
+
+  // Remember scroll position so we can maintain it after inserting
+  const prevScrollHeight = messagesContainer.scrollHeight;
+
+  try {
+    const olderMessages = await apiFetch(
+      `/api/conversations/${state.currentChatId}/messages?limit=${state.MESSAGE_PAGE_SIZE}&offset=${state.messageOffset}`
+    );
+
+    // Remove loading indicator
+    loadingEl.remove();
+
+    if (olderMessages.length === 0) {
+      state.hasMoreMessages = false;
+      // Show "beginning of conversation" marker
+      const beginEl = document.createElement('div');
+      beginEl.className = 'conversation-begin';
+      beginEl.innerHTML = `
+        <div class="conversation-begin-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" opacity="0.3"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
+        </div>
+        <p>Beginning of conversation</p>
+      `;
+      messagesList.prepend(beginEl);
+    } else {
+      state.messageOffset += olderMessages.length;
+      state.hasMoreMessages = olderMessages.length >= state.MESSAGE_PAGE_SIZE;
+
+      // Prepend older messages to state
+      state.messages = [...olderMessages, ...state.messages];
+
+      // Re-render all messages with full history
+      renderMessages(state.messages, state.currentChat.isGroup, state.reactions);
+
+      // Maintain scroll position
+      requestAnimationFrame(() => {
+        const newScrollHeight = messagesContainer.scrollHeight;
+        messagesContainer.scrollTop = newScrollHeight - prevScrollHeight;
+      });
+    }
+  } catch (err) {
+    console.error('Failed to load older messages:', err);
+    loadingEl.remove();
+  }
+
+  state.loadingOlder = false;
 }
 
 // ─── HANDLE NEW MESSAGES (REAL-TIME) ───
@@ -1058,6 +1128,13 @@ messageInput.addEventListener('keydown', (e) => {
 });
 
 sendBtn.addEventListener('click', sendMessage);
+
+// Scroll to load older messages
+messagesContainer.addEventListener('scroll', () => {
+  if (messagesContainer.scrollTop < 150 && state.hasMoreMessages && !state.loadingOlder) {
+    loadOlderMessages();
+  }
+});
 
 // Settings
 settingsBtn.addEventListener('click', () => {
