@@ -8,6 +8,46 @@ class MessageDB {
     this.db.pragma('journal_mode = WAL');
   }
 
+  // ─── PARSE attributedBody BLOB ───
+  // On macOS Ventura+ (13.0+), Apple stores message text in the attributedBody
+  // BLOB column (NSMutableAttributedString typedstream) instead of the text column.
+  // This parses the binary blob to extract the plain text.
+  parseAttributedBody(blob) {
+    if (!blob || !Buffer.isBuffer(blob)) return null;
+    try {
+      const marker = Buffer.from('NSString');
+      const idx = blob.indexOf(marker);
+      if (idx === -1) return null;
+
+      const content = blob.subarray(idx + marker.length + 5);
+      let length, start;
+
+      if (content[0] === 0x81) {
+        // Length encoded as 2-byte little-endian
+        length = content[1] | (content[2] << 8);
+        start = 3;
+      } else {
+        // Length is a single byte
+        length = content[0];
+        start = 1;
+      }
+
+      if (length <= 0 || start + length > content.length) return null;
+      const text = content.subarray(start, start + length).toString('utf-8');
+      return text.length > 0 ? text : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Helper: get text from either text column or attributedBody
+  getMessageText(row) {
+    if (row.text && row.text.trim().length > 0) return row.text;
+    if (row.attributedBody) return this.parseAttributedBody(row.attributedBody);
+    if (row.last_message_body) return this.parseAttributedBody(row.last_message_body);
+    return null;
+  }
+
   // Get all conversations with last message preview
   getConversations() {
     const stmt = this.db.prepare(`
@@ -21,6 +61,7 @@ class MessageDB {
         (SELECT COUNT(*) FROM chat_message_join cmj2 WHERE cmj2.chat_id = c.ROWID) as message_count,
         m.ROWID as last_message_rowid,
         m.text as last_message_text,
+        m.attributedBody as last_message_body,
         m.date as last_message_date,
         m.is_from_me as last_message_from_me,
         m.cache_has_attachments as has_attachments,
@@ -49,7 +90,7 @@ class MessageDB {
       isGroup: row.chat_style === 43,
       messageCount: row.message_count,
       lastMessage: {
-        text: row.last_message_text,
+        text: row.last_message_text || this.parseAttributedBody(row.last_message_body),
         date: this.convertAppleTimestamp(row.last_message_date),
         isFromMe: row.last_message_from_me === 1,
         hasAttachments: row.has_attachments === 1
@@ -66,6 +107,7 @@ class MessageDB {
         m.ROWID as rowid,
         m.guid as message_guid,
         m.text,
+        m.attributedBody,
         m.date as message_date,
         m.date_delivered,
         m.date_read,
@@ -141,11 +183,14 @@ class MessageDB {
   }
 
   // Search messages across all conversations
+  // Searches both text column and parses attributedBody for newer macOS
   searchMessages(query, limit = 50) {
-    const stmt = this.db.prepare(`
+    // First search in text column
+    const textStmt = this.db.prepare(`
       SELECT
         m.ROWID as rowid,
         m.text,
+        m.attributedBody,
         m.date as message_date,
         m.is_from_me,
         h.id as sender_id,
@@ -161,10 +206,51 @@ class MessageDB {
       LIMIT ?
     `);
 
-    const rows = stmt.all(`%${query}%`, limit);
-    return rows.map(row => ({
+    const textRows = textStmt.all(`%${query}%`, limit);
+
+    // Also search in attributedBody for messages where text is NULL
+    const bodyStmt = this.db.prepare(`
+      SELECT
+        m.ROWID as rowid,
+        m.text,
+        m.attributedBody,
+        m.date as message_date,
+        m.is_from_me,
+        h.id as sender_id,
+        c.ROWID as chat_id,
+        c.display_name,
+        c.chat_identifier
+      FROM message m
+      JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+      JOIN chat c ON c.ROWID = cmj.chat_id
+      LEFT JOIN handle h ON h.ROWID = m.handle_id
+      WHERE m.text IS NULL AND m.attributedBody IS NOT NULL
+      ORDER BY m.date DESC
+      LIMIT 2000
+    `);
+
+    const bodyRows = bodyStmt.all();
+    const lowerQuery = query.toLowerCase();
+    const bodyMatches = bodyRows
+      .map(row => {
+        const parsed = this.parseAttributedBody(row.attributedBody);
+        return parsed && parsed.toLowerCase().includes(lowerQuery) ? { ...row, text: parsed } : null;
+      })
+      .filter(Boolean)
+      .slice(0, limit);
+
+    // Combine and deduplicate
+    const seenIds = new Set(textRows.map(r => r.rowid));
+    const combined = [...textRows];
+    for (const row of bodyMatches) {
+      if (!seenIds.has(row.rowid)) {
+        combined.push(row);
+      }
+    }
+
+    return combined.slice(0, limit).map(row => ({
       rowid: row.rowid,
-      text: row.text,
+      text: row.text || this.parseAttributedBody(row.attributedBody),
       date: this.convertAppleTimestamp(row.message_date),
       isFromMe: row.is_from_me === 1,
       senderId: row.sender_id,
@@ -180,6 +266,7 @@ class MessageDB {
         m.ROWID as rowid,
         m.guid as message_guid,
         m.text,
+        m.attributedBody,
         m.date as message_date,
         m.is_from_me,
         m.cache_has_attachments as has_attachments,
@@ -241,9 +328,7 @@ class MessageDB {
       const guid = row.associated_message_guid;
       if (!guid) continue;
 
-      // Clean up the GUID - remove the "p:X/" prefix if present
       const cleanGuid = guid.replace(/^p:\d+\//, '').replace(/^bp:/, '');
-
       if (!reactionMap[cleanGuid]) reactionMap[cleanGuid] = [];
 
       const type = row.associated_message_type;
@@ -294,10 +379,13 @@ class MessageDB {
       }
     }
 
+    // Use text column, fall back to parsing attributedBody blob
+    const text = row.text || this.parseAttributedBody(row.attributedBody) || null;
+
     return {
       rowid: row.rowid,
       guid: row.message_guid,
-      text: row.text,
+      text,
       date: this.convertAppleTimestamp(row.message_date),
       dateDelivered: row.date_delivered ? this.convertAppleTimestamp(row.date_delivered) : null,
       dateRead: row.date_read ? this.convertAppleTimestamp(row.date_read) : null,
@@ -319,7 +407,6 @@ class MessageDB {
   // Apple uses nanoseconds since 2001-01-01
   convertAppleTimestamp(timestamp) {
     if (!timestamp) return null;
-    // Handle both nanosecond and second timestamps
     const seconds = timestamp > 1e15 ? timestamp / 1e9 : timestamp;
     const appleEpoch = new Date('2001-01-01T00:00:00Z').getTime() / 1000;
     const unixTimestamp = seconds + appleEpoch;

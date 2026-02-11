@@ -487,7 +487,7 @@ function renderMessages(messages, isGroup, reactions = {}) {
       lastDate = msgDate;
       const sep = document.createElement('div');
       sep.className = 'date-separator';
-      sep.textContent = formatDateSeparator(msg.date);
+      sep.innerHTML = `<span style="background:var(--bg-primary);padding:0 12px;position:relative;z-index:1">${escapeHtml(formatDateSeparator(msg.date))}</span>`;
       messagesList.appendChild(sep);
       lastSenderId = null;
       lastIsFromMe = null;
