@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
 
@@ -10,10 +10,10 @@ const store = new Store({
 });
 
 let mainWindow;
-let tray;
 
 function createWindow() {
   const bounds = store.get('windowBounds');
+  const isDark = nativeTheme.shouldUseDarkColors;
 
   mainWindow = new BrowserWindow({
     width: bounds.width,
@@ -23,17 +23,19 @@ function createWindow() {
     title: 'iMessage',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#f5f5f7',
-      symbolColor: '#1d1d1f',
-      height: 38
+      color: isDark ? '#1c1c1e' : '#f6f6f8',
+      symbolColor: isDark ? '#f5f5f7' : '#1d1d1f',
+      height: 52
     },
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
       spellcheck: true
     },
-    backgroundColor: '#f5f5f7',
-    show: false
+    backgroundColor: isDark ? '#1c1c1e' : '#f5f5f7',
+    show: false,
+    vibrancy: 'sidebar',
+    visualEffectState: 'active'
   });
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
@@ -49,6 +51,17 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+
+  // Update titlebar color when theme changes
+  nativeTheme.on('updated', () => {
+    const dark = nativeTheme.shouldUseDarkColors;
+    if (mainWindow) {
+      mainWindow.setTitleBarOverlay({
+        color: dark ? '#1c1c1e' : '#f6f6f8',
+        symbolColor: dark ? '#f5f5f7' : '#1d1d1f'
+      });
+    }
   });
 }
 

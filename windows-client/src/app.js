@@ -21,6 +21,7 @@ const setupScreen = $('#setup-screen');
 const mainApp = $('#main-app');
 const serverUrlInput = $('#server-url-input');
 const connectBtn = $('#connect-btn');
+const connectBtnText = $('#connect-btn-text');
 const connectionError = $('#connection-error');
 const conversationList = $('#conversation-list');
 const searchInput = $('#search-input');
@@ -40,13 +41,14 @@ const settingsServerUrl = $('#settings-server-url');
 const settingsSave = $('#settings-save');
 const settingsCancel = $('#settings-cancel');
 const chatInfoBtn = $('#chat-info-btn');
+const chatHeaderInfoClick = $('#chat-header-info-click');
 const infoPanel = $('#info-panel');
 const closeInfoBtn = $('#close-info-btn');
 const infoPanelContent = $('#info-panel-content');
 const serverInfo = $('#server-info');
 
 // ─── AVATAR COLORS ───
-const AVATAR_COLORS = ['blue', 'green', 'orange', 'purple', 'red', 'teal', 'pink'];
+const AVATAR_COLORS = ['blue', 'green', 'orange', 'purple', 'red', 'teal', 'pink', 'indigo'];
 
 function getAvatarColor(name) {
   let hash = 0;
@@ -58,7 +60,12 @@ function getAvatarColor(name) {
 
 function getInitials(name) {
   if (!name) return '?';
-  const parts = name.trim().split(/[\s@+.]+/);
+  // If it looks like a phone number, show last 2 digits
+  if (/^[\d+\s()-]+$/.test(name) && name.replace(/\D/g, '').length >= 7) {
+    const digits = name.replace(/\D/g, '');
+    return digits.slice(-2);
+  }
+  const parts = name.trim().split(/[\s]+/).filter(Boolean);
   if (parts.length >= 2) {
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   }
@@ -79,15 +86,16 @@ function formatTime(isoDate) {
     return 'Yesterday';
   } else if (diffDays < 7) {
     return date.toLocaleDateString([], { weekday: 'short' });
-  } else {
+  } else if (date.getFullYear() === now.getFullYear()) {
     return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  } else {
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
   }
 }
 
 function formatMessageTime(isoDate) {
   if (!isoDate) return '';
-  const date = new Date(isoDate);
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return new Date(isoDate).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
 function formatDateSeparator(isoDate) {
@@ -99,6 +107,12 @@ function formatDateSeparator(isoDate) {
 
   if (diffDays === 0) return 'Today';
   if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) {
+    return date.toLocaleDateString([], { weekday: 'long' });
+  }
+  if (date.getFullYear() === now.getFullYear()) {
+    return date.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+  }
   return date.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 }
 
@@ -126,45 +140,32 @@ async function apiPost(endpoint, body) {
 async function connectToServer(url) {
   state.serverUrl = url.replace(/\/$/, '');
 
-  try {
-    // Test connection
-    const info = await apiFetch('/api/info');
-    console.log('Connected to server:', info);
+  const info = await apiFetch('/api/info');
+  console.log('Connected to server:', info);
 
-    // Save URL
-    await ipcRenderer.invoke('set-server-url', state.serverUrl);
+  await ipcRenderer.invoke('set-server-url', state.serverUrl);
 
-    // Connect WebSocket
-    if (state.socket) state.socket.disconnect();
-    state.socket = io(state.serverUrl, { transports: ['websocket', 'polling'] });
+  if (state.socket) state.socket.disconnect();
+  state.socket = io(state.serverUrl, { transports: ['websocket', 'polling'] });
 
-    state.socket.on('connect', () => {
-      state.isConnected = true;
-      console.log('WebSocket connected');
-    });
+  state.socket.on('connect', () => {
+    state.isConnected = true;
+    console.log('WebSocket connected');
+  });
 
-    state.socket.on('disconnect', () => {
-      state.isConnected = false;
-      console.log('WebSocket disconnected');
-    });
+  state.socket.on('disconnect', () => {
+    state.isConnected = false;
+    console.log('WebSocket disconnected');
+  });
 
-    state.socket.on('new-messages', (messages) => {
-      handleNewMessages(messages);
-    });
+  state.socket.on('new-messages', (messages) => {
+    handleNewMessages(messages);
+  });
 
-    // Load data
-    await loadConversations();
-    await loadContacts();
+  await Promise.all([loadConversations(), loadContacts()]);
 
-    // Switch to main app
-    setupScreen.style.display = 'none';
-    mainApp.style.display = 'flex';
-
-    return true;
-  } catch (err) {
-    console.error('Connection failed:', err);
-    throw err;
-  }
+  setupScreen.style.display = 'none';
+  mainApp.style.display = 'flex';
 }
 
 // ─── LOAD DATA ───
@@ -180,16 +181,19 @@ async function loadConversations() {
 async function loadContacts() {
   try {
     state.contacts = await apiFetch('/api/contacts');
-    // Build lookup map
     state.contactMap = {};
     for (const contact of state.contacts) {
       for (const phone of contact.phones) {
         const norm = phone.replace(/\D/g, '').slice(-10);
-        state.contactMap[norm] = contact.name;
+        if (norm.length >= 7) state.contactMap[norm] = contact.name;
       }
       for (const email of contact.emails) {
         state.contactMap[email.toLowerCase()] = contact.name;
       }
+    }
+    // Re-render conversations with resolved names
+    if (state.conversations.length > 0) {
+      renderConversationList(state.conversations);
     }
   } catch (err) {
     console.error('Failed to load contacts:', err);
@@ -198,15 +202,10 @@ async function loadContacts() {
 
 function resolveContactName(identifier) {
   if (!identifier) return null;
-  // Direct lookup
-  if (state.contactMap[identifier.toLowerCase()]) {
-    return state.contactMap[identifier.toLowerCase()];
-  }
-  // Phone number lookup
+  const lower = identifier.toLowerCase();
+  if (state.contactMap[lower]) return state.contactMap[lower];
   const norm = identifier.replace(/\D/g, '').slice(-10);
-  if (state.contactMap[norm]) {
-    return state.contactMap[norm];
-  }
+  if (norm.length >= 7 && state.contactMap[norm]) return state.contactMap[norm];
   return null;
 }
 
@@ -215,21 +214,37 @@ function getDisplayName(conv) {
     return conv.displayName;
   }
   if (conv.isGroup) {
-    // Try to build group name from participants
-    const names = conv.participants.map(p => resolveContactName(p) || p).slice(0, 3);
-    return names.join(', ') + (conv.participants.length > 3 ? ` +${conv.participants.length - 3}` : '');
+    const names = conv.participants.map(p => resolveContactName(p) || formatPhoneNumber(p)).slice(0, 3);
+    const suffix = conv.participants.length > 3 ? `, +${conv.participants.length - 3}` : '';
+    return names.join(', ') + suffix;
   }
-  return resolveContactName(conv.chatIdentifier) || conv.chatIdentifier;
+  return resolveContactName(conv.chatIdentifier) || formatPhoneNumber(conv.chatIdentifier);
+}
+
+function formatPhoneNumber(str) {
+  if (!str) return '?';
+  const digits = str.replace(/\D/g, '');
+  if (digits.length === 10) {
+    return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`;
+  }
+  if (digits.length === 11 && digits[0] === '1') {
+    return `(${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7)}`;
+  }
+  return str;
 }
 
 // ─── RENDER CONVERSATIONS ───
 function renderConversationList(conversations) {
   conversationList.innerHTML = '';
 
+  if (conversations.length === 0) {
+    conversationList.innerHTML = '<div class="empty-conversations"><p>No conversations yet</p></div>';
+    return;
+  }
+
   for (const conv of conversations) {
     const displayName = getDisplayName(conv);
     const color = conv.isGroup ? 'group' : getAvatarColor(displayName);
-    const initials = conv.isGroup ? (conv.participants.length + '') : getInitials(displayName);
     const isActive = state.currentChatId === conv.chatId;
 
     const item = document.createElement('div');
@@ -237,21 +252,26 @@ function renderConversationList(conversations) {
     item.dataset.chatId = conv.chatId;
 
     let previewText = conv.lastMessage.text || '';
-    if (conv.lastMessage.hasAttachments && !previewText) {
-      previewText = 'Attachment';
-    }
+    if (conv.lastMessage.hasAttachments && !previewText) previewText = 'Attachment';
     if (conv.lastMessage.isFromMe && previewText) {
-      previewText = previewText;
+      previewText = 'You: ' + previewText;
     }
 
+    // Group icon SVG for group chats
+    const avatarContent = conv.isGroup
+      ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="white" opacity="0.9"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`
+      : getInitials(displayName);
+
     item.innerHTML = `
-      <div class="conv-avatar ${color}">${initials}</div>
+      <div class="conv-avatar ${color}">${avatarContent}</div>
       <div class="conv-content">
         <div class="conv-top-row">
           <span class="conv-name">${escapeHtml(displayName)}</span>
           <span class="conv-time">${formatTime(conv.lastMessage.date)}</span>
         </div>
-        <div class="conv-preview">${escapeHtml(previewText)}</div>
+        <div class="conv-bottom-row">
+          <span class="conv-preview">${escapeHtml(previewText)}</span>
+        </div>
       </div>
     `;
 
@@ -265,37 +285,43 @@ async function openConversation(conv) {
   state.currentChatId = conv.chatId;
   state.currentChat = conv;
 
-  // Update sidebar selection
   document.querySelectorAll('.conversation-item').forEach(el => {
     el.classList.toggle('active', parseInt(el.dataset.chatId) === conv.chatId);
   });
 
   const displayName = getDisplayName(conv);
+  const color = conv.isGroup ? 'group' : getAvatarColor(displayName);
 
-  // Update header
   noChat.style.display = 'none';
   activeChat.style.display = 'flex';
   infoPanel.style.display = 'none';
 
   chatName.textContent = displayName;
-  chatAvatarText.textContent = conv.isGroup ? conv.participants.length : getInitials(displayName);
-  chatAvatar.style.background = conv.isGroup ? '#8e8e93' : '';
 
   if (conv.isGroup) {
-    chatSubtitle.textContent = `${conv.participants.length} people`;
+    chatAvatarText.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="white" opacity="0.9"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`;
+    chatAvatar.className = 'chat-avatar';
+    chatAvatar.style.background = 'linear-gradient(135deg, #636366, #48484a)';
+    chatSubtitle.innerHTML = `${conv.participants.length} people`;
   } else {
-    chatSubtitle.textContent = conv.service === 'iMessage' ? 'iMessage' : 'SMS';
+    chatAvatarText.textContent = getInitials(displayName);
+    chatAvatar.className = 'chat-avatar';
+    chatAvatar.style.background = '';
+    chatAvatar.classList.add(color);
+    const serviceLabel = conv.service === 'iMessage' ? 'iMessage' : 'SMS';
+    chatSubtitle.innerHTML = `<span class="status-dot"></span> ${serviceLabel}`;
   }
 
-  // Load messages
+  messagesList.innerHTML = '<div style="display:flex;justify-content:center;padding:40px;"><div class="loading-spinner"></div></div>';
+
   try {
     const messages = await apiFetch(`/api/conversations/${conv.chatId}/messages?limit=100`);
     state.messages = messages;
     renderMessages(messages, conv.isGroup);
-    scrollToBottom();
+    scrollToBottom(false);
   } catch (err) {
     console.error('Failed to load messages:', err);
-    messagesList.innerHTML = '<p style="text-align:center;color:#8e8e93;padding:20px;">Failed to load messages</p>';
+    messagesList.innerHTML = '<p style="text-align:center;color:var(--text-tertiary);padding:40px;">Failed to load messages</p>';
   }
 
   messageInput.focus();
@@ -305,9 +331,13 @@ async function openConversation(conv) {
 function renderMessages(messages, isGroup) {
   messagesList.innerHTML = '';
   let lastDate = null;
-  let lastSender = null;
+  let lastSenderId = null;
+  let lastIsFromMe = null;
 
-  for (const msg of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const nextMsg = messages[i + 1];
+
     // Date separator
     const msgDate = msg.date ? new Date(msg.date).toDateString() : null;
     if (msgDate && msgDate !== lastDate) {
@@ -316,10 +346,11 @@ function renderMessages(messages, isGroup) {
       sep.className = 'date-separator';
       sep.textContent = formatDateSeparator(msg.date);
       messagesList.appendChild(sep);
-      lastSender = null;
+      lastSenderId = null;
+      lastIsFromMe = null;
     }
 
-    // Skip group actions / system messages with no text
+    // Skip group actions with no text
     if (msg.isGroupAction && !msg.text) {
       const action = document.createElement('div');
       action.className = 'group-action';
@@ -328,25 +359,24 @@ function renderMessages(messages, isGroup) {
       continue;
     }
 
-    // Skip tapback/reaction messages (associated_message_type != 0)
-    if (msg.associatedMessageType && msg.associatedMessageType !== 0) {
-      continue;
-    }
-
+    // Skip tapback/reaction messages
+    if (msg.associatedMessageType && msg.associatedMessageType !== 0) continue;
     if (!msg.text && msg.attachments.length === 0) continue;
 
     const row = document.createElement('div');
     row.className = `message-row ${msg.isFromMe ? 'from-me' : 'from-them'}`;
 
-    // Show sender name in group chats
-    const senderName = resolveContactName(msg.senderId) || msg.senderDisplay || msg.senderId;
-    if (isGroup && !msg.isFromMe && senderName !== lastSender) {
+    // Show sender name in group chats (only when sender changes)
+    const currentSenderId = msg.isFromMe ? '__me__' : (msg.senderId || msg.senderDisplay);
+    const showSender = isGroup && !msg.isFromMe && currentSenderId !== lastSenderId;
+
+    if (showSender) {
+      const senderName = resolveContactName(msg.senderId) || msg.senderDisplay || formatPhoneNumber(msg.senderId);
       const senderEl = document.createElement('div');
       senderEl.className = 'message-sender';
       senderEl.textContent = senderName;
       row.appendChild(senderEl);
     }
-    lastSender = msg.isFromMe ? null : senderName;
 
     // Message bubble
     if (msg.text) {
@@ -366,13 +396,14 @@ function renderMessages(messages, isGroup) {
         img.src = `${state.serverUrl}/api/attachment-by-path?path=${encodeURIComponent(att.filename)}`;
         img.alt = att.transferName;
         img.loading = 'lazy';
+        img.onerror = () => { img.style.display = 'none'; };
         attEl.appendChild(img);
       } else {
         attEl.innerHTML = `
           <div class="attachment-file">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M4 1h5.586L13 4.414V14a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z"/>
-            </svg>
+            <div class="attachment-file-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+            </div>
             <span>${escapeHtml(att.transferName || 'File')}</span>
           </div>
         `;
@@ -380,25 +411,53 @@ function renderMessages(messages, isGroup) {
       row.appendChild(attEl);
     }
 
-    // Timestamp
-    const time = document.createElement('div');
-    time.className = 'message-time';
-    time.textContent = formatMessageTime(msg.date);
-    row.appendChild(time);
+    // Metadata (time + delivery status) — shown on hover or last message
+    const isLastMsg = i === messages.length - 1;
+    const nextIsDifferentSender = !nextMsg || (nextMsg.isFromMe !== msg.isFromMe);
 
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'message-time';
+    timeSpan.textContent = formatMessageTime(msg.date);
+    meta.appendChild(timeSpan);
+
+    // Delivery / read status for sent messages
+    if (msg.isFromMe && (isLastMsg || nextIsDifferentSender)) {
+      const statusSpan = document.createElement('span');
+      if (msg.dateRead) {
+        statusSpan.className = 'message-status read';
+        statusSpan.textContent = 'Read';
+      } else if (msg.dateDelivered) {
+        statusSpan.className = 'message-status delivered';
+        statusSpan.textContent = 'Delivered';
+      } else {
+        statusSpan.className = 'message-status';
+        statusSpan.textContent = 'Sent';
+      }
+      meta.appendChild(statusSpan);
+    }
+
+    row.appendChild(meta);
     messagesList.appendChild(row);
+
+    lastSenderId = currentSenderId;
+    lastIsFromMe = msg.isFromMe;
   }
 }
 
-function scrollToBottom() {
+function scrollToBottom(smooth = true) {
   requestAnimationFrame(() => {
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    messagesContainer.scrollTo({
+      top: messagesContainer.scrollHeight,
+      behavior: smooth ? 'smooth' : 'instant'
+    });
   });
 }
 
 // ─── HANDLE NEW MESSAGES (REAL-TIME) ───
 function handleNewMessages(newMessages) {
-  // Update conversation list
   for (const msg of newMessages) {
     const conv = state.conversations.find(c => c.chatId === msg.chatId);
     if (conv) {
@@ -411,7 +470,6 @@ function handleNewMessages(newMessages) {
     }
   }
 
-  // Re-sort and render conversation list
   state.conversations.sort((a, b) => {
     const dateA = a.lastMessage.date ? new Date(a.lastMessage.date) : 0;
     const dateB = b.lastMessage.date ? new Date(b.lastMessage.date) : 0;
@@ -419,14 +477,13 @@ function handleNewMessages(newMessages) {
   });
   renderConversationList(state.conversations);
 
-  // If viewing a conversation that received new messages, append them
   const relevantMessages = newMessages.filter(m => m.chatId === state.currentChatId);
   if (relevantMessages.length > 0 && state.currentChat) {
     for (const msg of relevantMessages) {
       state.messages.push(msg);
       appendMessageToView(msg, state.currentChat.isGroup);
     }
-    scrollToBottom();
+    scrollToBottom(true);
   }
 }
 
@@ -438,7 +495,7 @@ function appendMessageToView(msg, isGroup) {
   row.className = `message-row ${msg.isFromMe ? 'from-me' : 'from-them'}`;
 
   if (isGroup && !msg.isFromMe) {
-    const senderName = resolveContactName(msg.senderId) || msg.senderDisplay || msg.senderId;
+    const senderName = resolveContactName(msg.senderId) || msg.senderDisplay || formatPhoneNumber(msg.senderId);
     const senderEl = document.createElement('div');
     senderEl.className = 'message-sender';
     senderEl.textContent = senderName;
@@ -468,11 +525,21 @@ function appendMessageToView(msg, isGroup) {
     }
   }
 
-  const time = document.createElement('div');
-  time.className = 'message-time';
-  time.textContent = formatMessageTime(msg.date);
-  row.appendChild(time);
+  const meta = document.createElement('div');
+  meta.className = 'message-meta';
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'message-time';
+  timeSpan.textContent = formatMessageTime(msg.date);
+  meta.appendChild(timeSpan);
 
+  if (msg.isFromMe) {
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'message-status';
+    statusSpan.textContent = 'Sent';
+    meta.appendChild(statusSpan);
+  }
+
+  row.appendChild(meta);
   messagesList.appendChild(row);
 }
 
@@ -482,6 +549,19 @@ async function sendMessage() {
   if (!text || !state.currentChat) return;
 
   const conv = state.currentChat;
+
+  // Optimistic UI: show message immediately
+  const tempMsg = {
+    text,
+    date: new Date().toISOString(),
+    isFromMe: true,
+    senderId: null,
+    attachments: [],
+    associatedMessageType: 0
+  };
+  appendMessageToView(tempMsg, conv.isGroup);
+  scrollToBottom(true);
+
   messageInput.value = '';
   autoResizeTextarea();
   sendBtn.disabled = true;
@@ -501,10 +581,16 @@ async function sendMessage() {
     }
   } catch (err) {
     console.error('Failed to send:', err);
-    // Show error in the message input
     messageInput.value = text;
-    messageInput.style.borderColor = '#ff3b30';
-    setTimeout(() => { messageInput.style.borderColor = ''; }, 2000);
+    autoResizeTextarea();
+    // Flash the input red briefly
+    const wrapper = messageInput.closest('.message-input-wrapper');
+    wrapper.style.borderColor = 'var(--red)';
+    wrapper.style.boxShadow = '0 0 0 3px rgba(255,59,48,0.2)';
+    setTimeout(() => {
+      wrapper.style.borderColor = '';
+      wrapper.style.boxShadow = '';
+    }, 2000);
   }
 }
 
@@ -515,18 +601,16 @@ async function handleSearch(query) {
     return;
   }
 
-  // Filter conversations locally first
+  const q = query.toLowerCase();
   const filtered = state.conversations.filter(conv => {
     const name = getDisplayName(conv).toLowerCase();
     const preview = (conv.lastMessage.text || '').toLowerCase();
-    const q = query.toLowerCase();
     return name.includes(q) || preview.includes(q);
   });
 
   if (filtered.length > 0) {
     renderConversationList(filtered);
   } else {
-    // Search messages on server
     try {
       const results = await apiFetch(`/api/search?q=${encodeURIComponent(query)}`);
       renderSearchResults(results, query);
@@ -540,7 +624,7 @@ function renderSearchResults(results, query) {
   conversationList.innerHTML = '';
 
   if (results.length === 0) {
-    conversationList.innerHTML = '<p style="text-align:center;color:#8e8e93;padding:20px;">No results found</p>';
+    conversationList.innerHTML = '<div class="empty-conversations"><p>No results found</p></div>';
     return;
   }
 
@@ -551,7 +635,7 @@ function renderSearchResults(results, query) {
     const item = document.createElement('div');
     item.className = 'search-result-item';
 
-    const chatDisplayName = resolveContactName(result.chatName) || result.chatName;
+    const chatDisplayName = resolveContactName(result.chatName) || formatPhoneNumber(result.chatName);
     const highlightedText = (result.text || '').replace(
       new RegExp(`(${escapeRegExp(query)})`, 'gi'),
       '<mark>$1</mark>'
@@ -583,40 +667,74 @@ async function showInfoPanel() {
 
   try {
     const details = await apiFetch(`/api/conversations/${state.currentChatId}`);
+    const displayName = getDisplayName(state.currentChat);
+    const color = state.currentChat.isGroup ? 'group' : getAvatarColor(displayName);
+
     infoPanelContent.innerHTML = '';
 
+    // Profile header
+    const profile = document.createElement('div');
+    profile.className = 'info-profile';
+
+    const avatarBg = state.currentChat.isGroup
+      ? 'linear-gradient(135deg, #636366, #48484a)'
+      : `var(--${color === 'blue' ? 'accent' : color})`;
+
+    const avatarContent = state.currentChat.isGroup
+      ? `<svg width="32" height="32" viewBox="0 0 24 24" fill="white" opacity="0.9"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`
+      : getInitials(displayName);
+
+    profile.innerHTML = `
+      <div class="info-profile-avatar" style="background:${avatarBg}">${avatarContent}</div>
+      <div class="info-profile-name">${escapeHtml(displayName)}</div>
+      <div class="info-profile-id">${escapeHtml(details.chatIdentifier)} &middot; ${details.service}</div>
+    `;
+    infoPanelContent.appendChild(profile);
+
     // Participants section
-    const section = document.createElement('div');
-    section.className = 'info-section';
-    section.innerHTML = `<h4>${details.isGroup ? 'Members' : 'Contact'}</h4>`;
+    if (details.participants.length > 0) {
+      const section = document.createElement('div');
+      section.className = 'info-section';
+      section.innerHTML = `<h4>${details.isGroup ? 'Members' : 'Contact'}</h4>`;
 
-    for (const p of details.participants) {
-      const contactName = resolveContactName(p.id) || p.displayId;
-      const color = getAvatarColor(contactName);
+      for (const p of details.participants) {
+        const contactName = resolveContactName(p.id) || p.displayId || formatPhoneNumber(p.id);
+        const pColor = getAvatarColor(contactName);
 
-      const pEl = document.createElement('div');
-      pEl.className = 'info-participant';
-      pEl.innerHTML = `
-        <div class="info-participant-avatar" style="background:var(--bubble-${color === 'blue' ? 'blue' : 'green'})">${getInitials(contactName)}</div>
-        <div>
-          <div class="info-participant-name">${escapeHtml(contactName)}</div>
-          <div class="info-participant-id">${escapeHtml(p.id)} - ${p.service}</div>
-        </div>
-      `;
-      section.appendChild(pEl);
+        const pEl = document.createElement('div');
+        pEl.className = 'info-participant';
+        pEl.innerHTML = `
+          <div class="info-participant-avatar" style="background:linear-gradient(135deg, var(--${pColor}), var(--${pColor}))">${getInitials(contactName)}</div>
+          <div>
+            <div class="info-participant-name">${escapeHtml(contactName)}</div>
+            <div class="info-participant-id">${escapeHtml(p.id)}</div>
+          </div>
+        `;
+        section.appendChild(pEl);
+      }
+
+      infoPanelContent.appendChild(section);
     }
 
-    infoPanelContent.appendChild(section);
-
-    // Chat info section
-    const infoSection = document.createElement('div');
-    infoSection.className = 'info-section';
-    infoSection.innerHTML = `
-      <h4>Chat Info</h4>
-      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:6px;">Service: ${details.service}</p>
-      <p style="font-size:13px;color:var(--text-secondary);">ID: ${details.chatIdentifier}</p>
+    // Details section
+    const detailSection = document.createElement('div');
+    detailSection.className = 'info-section';
+    detailSection.innerHTML = `
+      <h4>Details</h4>
+      <div class="info-detail-row">
+        <span class="info-detail-label">Service</span>
+        <span class="info-detail-value">${details.service}</span>
+      </div>
+      <div class="info-detail-row">
+        <span class="info-detail-label">Type</span>
+        <span class="info-detail-value">${details.isGroup ? 'Group Chat' : 'Direct Message'}</span>
+      </div>
+      <div class="info-detail-row">
+        <span class="info-detail-label">Members</span>
+        <span class="info-detail-value">${details.participants.length}</span>
+      </div>
     `;
-    infoPanelContent.appendChild(infoSection);
+    infoPanelContent.appendChild(detailSection);
 
     infoPanel.style.display = 'flex';
   } catch (err) {
@@ -627,7 +745,7 @@ async function showInfoPanel() {
 // ─── TEXTAREA AUTO-RESIZE ───
 function autoResizeTextarea() {
   messageInput.style.height = 'auto';
-  messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+  messageInput.style.height = Math.min(messageInput.scrollHeight, 140) + 'px';
   sendBtn.disabled = !messageInput.value.trim();
 }
 
@@ -650,21 +768,22 @@ connectBtn.addEventListener('click', async () => {
   if (!url) return;
 
   connectBtn.disabled = true;
-  connectBtn.textContent = 'Connecting...';
+  connectBtn.classList.add('connecting');
+  connectBtnText.textContent = 'Connecting...';
   connectionError.style.display = 'none';
 
   try {
     await connectToServer(url);
   } catch (err) {
-    connectionError.textContent = `Connection failed: ${err.message}. Make sure the server is running on your Mac.`;
+    connectionError.textContent = `Could not connect. Make sure the server is running on your Mac and both devices are on the same network.`;
     connectionError.style.display = 'block';
   } finally {
     connectBtn.disabled = false;
-    connectBtn.textContent = 'Connect';
+    connectBtn.classList.remove('connecting');
+    connectBtnText.textContent = 'Connect';
   }
 });
 
-// Enter key on server URL input
 serverUrlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') connectBtn.click();
 });
@@ -672,7 +791,16 @@ serverUrlInput.addEventListener('keydown', (e) => {
 // Search
 searchInput.addEventListener('input', (e) => {
   clearTimeout(state.searchTimeout);
-  state.searchTimeout = setTimeout(() => handleSearch(e.target.value), 300);
+  state.searchTimeout = setTimeout(() => handleSearch(e.target.value), 250);
+});
+
+// Escape to clear search
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    searchInput.value = '';
+    renderConversationList(state.conversations);
+    searchInput.blur();
+  }
 });
 
 // Message input
@@ -684,7 +812,6 @@ messageInput.addEventListener('keydown', (e) => {
   }
 });
 
-// Send button
 sendBtn.addEventListener('click', sendMessage);
 
 // Settings
@@ -692,15 +819,14 @@ settingsBtn.addEventListener('click', () => {
   settingsServerUrl.value = state.serverUrl;
   settingsModal.style.display = 'flex';
 
-  // Load server info
   apiFetch('/api/info').then(info => {
     serverInfo.innerHTML = `
       <p><strong>Host:</strong> ${info.hostname}</p>
-      <p><strong>IPs:</strong> ${info.addresses.join(', ')}</p>
-      <p><strong>Uptime:</strong> ${Math.floor(info.uptime / 60)} min</p>
+      <p><strong>Network:</strong> ${info.addresses.join(', ')}</p>
+      <p><strong>Uptime:</strong> ${Math.floor(info.uptime / 60)}m ${Math.floor(info.uptime % 60)}s</p>
     `;
   }).catch(() => {
-    serverInfo.innerHTML = '<p>Could not fetch server info</p>';
+    serverInfo.innerHTML = '<p>Could not reach server</p>';
   });
 });
 
@@ -711,18 +837,27 @@ settingsCancel.addEventListener('click', () => {
 settingsSave.addEventListener('click', async () => {
   const url = settingsServerUrl.value.trim();
   if (!url) return;
-
   try {
     await connectToServer(url);
     settingsModal.style.display = 'none';
   } catch (err) {
-    alert(`Failed to connect: ${err.message}`);
+    alert(`Connection failed: ${err.message}`);
   }
 });
 
-// Close modal on overlay click
 document.querySelector('.modal-overlay')?.addEventListener('click', () => {
   settingsModal.style.display = 'none';
+});
+
+// Escape to close modal
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (settingsModal.style.display !== 'none') {
+      settingsModal.style.display = 'none';
+    } else if (infoPanel.style.display !== 'none') {
+      infoPanel.style.display = 'none';
+    }
+  }
 });
 
 // Info panel
@@ -732,6 +867,10 @@ chatInfoBtn.addEventListener('click', () => {
   } else {
     showInfoPanel();
   }
+});
+
+chatHeaderInfoClick.addEventListener('click', () => {
+  showInfoPanel();
 });
 
 closeInfoBtn.addEventListener('click', () => {
@@ -744,16 +883,17 @@ async function init() {
     const savedUrl = await ipcRenderer.invoke('get-server-url');
     if (savedUrl && savedUrl !== 'http://localhost:3782') {
       serverUrlInput.value = savedUrl;
-      // Try auto-connect
       try {
+        connectBtn.disabled = true;
+        connectBtnText.textContent = 'Reconnecting...';
         await connectToServer(savedUrl);
       } catch (e) {
-        // Show setup screen
-        serverUrlInput.value = savedUrl;
+        connectBtn.disabled = false;
+        connectBtnText.textContent = 'Connect';
       }
     }
   } catch (err) {
-    console.log('Not in Electron, running in browser mode');
+    console.log('Not in Electron environment');
   }
 }
 
