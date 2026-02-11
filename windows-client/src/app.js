@@ -285,14 +285,27 @@ async function loadContacts() {
     state.contacts = await apiFetch('/api/contacts');
     state.contactMap = {};
     for (const contact of state.contacts) {
+      if (!contact.name) continue;
       for (const phone of contact.phones) {
-        const norm = phone.replace(/\D/g, '').slice(-10);
-        if (norm.length >= 7) state.contactMap[norm] = contact.name;
+        // Store under multiple normalizations for best matching
+        const digits = phone.replace(/\D/g, '');
+        // Full digits (e.g., "12125551234")
+        if (digits.length >= 7) state.contactMap[digits] = contact.name;
+        // Last 10 digits (US number without country code)
+        const last10 = digits.slice(-10);
+        if (last10.length >= 7) state.contactMap[last10] = contact.name;
+        // Last 7 digits (local number)
+        const last7 = digits.slice(-7);
+        state.contactMap[last7] = contact.name;
+        // Also store the raw phone with + prefix stripped
+        const cleaned = phone.replace(/[\s()-]/g, '');
+        state.contactMap[cleaned.toLowerCase()] = contact.name;
       }
       for (const email of contact.emails) {
         state.contactMap[email.toLowerCase()] = contact.name;
       }
     }
+    console.log(`[Contacts] Mapped ${Object.keys(state.contactMap).length} identifiers from ${state.contacts.length} contacts`);
     // Re-render conversations with resolved names
     if (state.conversations.length > 0) {
       renderConversationList(state.conversations);
@@ -304,10 +317,27 @@ async function loadContacts() {
 
 function resolveContactName(identifier) {
   if (!identifier) return null;
+
+  // Try exact match first (for emails)
   const lower = identifier.toLowerCase();
   if (state.contactMap[lower]) return state.contactMap[lower];
-  const norm = identifier.replace(/\D/g, '').slice(-10);
-  if (norm.length >= 7 && state.contactMap[norm]) return state.contactMap[norm];
+
+  // Try cleaned phone (strip spaces, dashes, parens)
+  const cleaned = identifier.replace(/[\s()-]/g, '').toLowerCase();
+  if (state.contactMap[cleaned]) return state.contactMap[cleaned];
+
+  // Try digits only
+  const digits = identifier.replace(/\D/g, '');
+  if (state.contactMap[digits]) return state.contactMap[digits];
+
+  // Try last 10 digits
+  const last10 = digits.slice(-10);
+  if (last10.length >= 7 && state.contactMap[last10]) return state.contactMap[last10];
+
+  // Try last 7 digits (local number match)
+  const last7 = digits.slice(-7);
+  if (last7.length === 7 && state.contactMap[last7]) return state.contactMap[last7];
+
   return null;
 }
 
@@ -1142,11 +1172,32 @@ settingsBtn.addEventListener('click', () => {
   settingsModal.style.display = 'flex';
 
   apiFetch('/api/info').then(info => {
+    let tunnelHtml = '';
+    if (info.tunnelUrl) {
+      tunnelHtml = `
+        <div class="tunnel-status active">
+          <span class="tunnel-dot"></span>
+          <div>
+            <strong>Tunnel Active</strong><br>
+            <span class="tunnel-url">${escapeHtml(info.tunnelUrl)}</span>
+          </div>
+        </div>
+      `;
+    } else {
+      tunnelHtml = `
+        <div class="tunnel-status inactive">
+          <span class="tunnel-dot"></span>
+          <span>Tunnel not active — install cloudflared on Mac for cross-network access</span>
+        </div>
+      `;
+    }
+
     serverInfo.innerHTML = `
       <p><strong>Host:</strong> ${info.hostname}</p>
       <p><strong>Network:</strong> ${info.addresses.join(', ')}</p>
       <p><strong>Connection Code:</strong> <span style="font-family:var(--font-mono);font-weight:700;color:var(--accent)">${info.connectionCode || 'N/A'}</span></p>
       <p><strong>Uptime:</strong> ${Math.floor(info.uptime / 60)}m ${Math.floor(info.uptime % 60)}s</p>
+      ${tunnelHtml}
     `;
   }).catch(() => {
     serverInfo.innerHTML = '<p>Could not reach server</p>';

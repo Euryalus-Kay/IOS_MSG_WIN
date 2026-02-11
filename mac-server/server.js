@@ -173,6 +173,8 @@ app.post('/api/verify-code', (req, res) => {
 });
 
 // Get server info
+let tunnelUrl = null;
+
 app.get('/api/info', (req, res) => {
   const interfaces = os.networkInterfaces();
   const addresses = [];
@@ -188,7 +190,8 @@ app.get('/api/info', (req, res) => {
     addresses,
     platform: os.platform(),
     uptime: process.uptime(),
-    connectionCode: CONNECTION_CODE
+    connectionCode: CONNECTION_CODE,
+    tunnelUrl: tunnelUrl
   });
 });
 
@@ -233,5 +236,75 @@ server.listen(PORT, '0.0.0.0', () => {
       }
     }
   }
+  console.log(`\n[CONNECTION CODE] ${CONNECTION_CODE}`);
   console.log('\nWaiting for Windows client connections...\n');
+
+  // ─── AUTO-LAUNCH CLOUDFLARE TUNNEL ───
+  // Tries to create a free tunnel automatically if cloudflared is installed
+  if (process.env.TUNNEL !== '0' && process.env.TUNNEL !== 'false') {
+    tryStartTunnel(PORT);
+  }
 });
+
+// ─── CLOUDFLARE TUNNEL ───
+function tryStartTunnel(port) {
+  const { spawn, execSync } = require('child_process');
+
+  // Check if cloudflared is installed
+  let cloudflaredPath;
+  try {
+    cloudflaredPath = execSync('which cloudflared', { encoding: 'utf-8' }).trim();
+  } catch {
+    console.log('[TUNNEL] cloudflared not found. To enable cross-network access:');
+    console.log('         brew install cloudflared');
+    console.log('         Then restart the server.\n');
+    return;
+  }
+
+  console.log('[TUNNEL] Starting Cloudflare tunnel...');
+  const tunnel = spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${port}`], {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let urlFound = false;
+
+  const handleOutput = (data) => {
+    const text = data.toString();
+    // Look for the tunnel URL in the output
+    const match = text.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
+    if (match && !urlFound) {
+      urlFound = true;
+      tunnelUrl = match[0];
+      console.log(`\n[TUNNEL] ✓ Cross-network access enabled!`);
+      console.log(`[TUNNEL] Public URL: ${tunnelUrl}`);
+      console.log(`[TUNNEL] Use this URL in the Windows client to connect from ANY WiFi\n`);
+    }
+  };
+
+  tunnel.stdout.on('data', handleOutput);
+  tunnel.stderr.on('data', handleOutput);
+
+  tunnel.on('error', (err) => {
+    console.log(`[TUNNEL] Failed to start: ${err.message}`);
+  });
+
+  tunnel.on('exit', (code) => {
+    if (code !== 0 && code !== null) {
+      console.log(`[TUNNEL] Exited with code ${code}. Tunnel is offline.`);
+    }
+    tunnelUrl = null;
+  });
+
+  // Don't let the tunnel prevent the server from exiting
+  tunnel.unref();
+
+  // Clean up tunnel on process exit
+  process.on('SIGINT', () => {
+    tunnel.kill();
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    tunnel.kill();
+    process.exit(0);
+  });
+}

@@ -59,6 +59,7 @@ class MessageDB {
   }
 
   // Get messages for a specific conversation
+  // Excludes tapback reactions so pagination counts real messages only
   getMessages(chatId, limit = 50, offset = 0) {
     const stmt = this.db.prepare(`
       SELECT
@@ -89,6 +90,7 @@ class MessageDB {
       JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
       LEFT JOIN handle h ON h.ROWID = m.handle_id
       WHERE cmj.chat_id = ?
+        AND (m.associated_message_type IS NULL OR m.associated_message_type = 0)
       ORDER BY m.date DESC
       LIMIT ? OFFSET ?
     `);
