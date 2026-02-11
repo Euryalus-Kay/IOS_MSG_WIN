@@ -1,0 +1,210 @@
+const express = require('express');
+const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
+const os = require('os');
+const { MessageDB } = require('./lib/message-db');
+const { ContactsManager } = require('./lib/contacts');
+const { AppleScriptSender } = require('./lib/sender');
+const { AttachmentServer } = require('./lib/attachments');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] }
+});
+
+app.use(cors());
+app.use(express.json());
+
+const DB_PATH = path.join(os.homedir(), 'Library', 'Messages', 'chat.db');
+const ATTACHMENTS_BASE = path.join(os.homedir(), 'Library', 'Messages', 'Attachments');
+
+let messageDB;
+let contactsManager;
+let sender;
+let attachmentServer;
+
+try {
+  messageDB = new MessageDB(DB_PATH);
+  contactsManager = new ContactsManager();
+  sender = new AppleScriptSender();
+  attachmentServer = new AttachmentServer(ATTACHMENTS_BASE);
+  console.log('[OK] iMessage database connected');
+} catch (err) {
+  console.error('[ERROR] Failed to connect to iMessage database.');
+  console.error('Make sure Terminal/Node has Full Disk Access in System Preferences > Privacy & Security > Full Disk Access');
+  console.error(err.message);
+  process.exit(1);
+}
+
+// ─── REST API ROUTES ───
+
+// Get all conversations
+app.get('/api/conversations', (req, res) => {
+  try {
+    const conversations = messageDB.getConversations();
+    res.json(conversations);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get messages for a conversation
+app.get('/api/conversations/:chatId/messages', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+    const messages = messageDB.getMessages(req.params.chatId, limit, offset);
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get conversation details
+app.get('/api/conversations/:chatId', (req, res) => {
+  try {
+    const details = messageDB.getConversationDetails(req.params.chatId);
+    res.json(details);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Search messages
+app.get('/api/search', (req, res) => {
+  try {
+    const query = req.query.q;
+    if (!query) return res.json([]);
+    const results = messageDB.searchMessages(query);
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get contacts
+app.get('/api/contacts', async (req, res) => {
+  try {
+    const contacts = await contactsManager.getContacts();
+    res.json(contacts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send a message
+app.post('/api/send', async (req, res) => {
+  try {
+    const { recipient, message, isGroup, groupName } = req.body;
+    if (!message) return res.status(400).json({ error: 'Message is required' });
+
+    if (isGroup && groupName) {
+      await sender.sendToGroup(groupName, message);
+    } else if (recipient) {
+      await sender.sendMessage(recipient, message);
+    } else {
+      return res.status(400).json({ error: 'Recipient or group name is required' });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Serve attachment files
+app.get('/api/attachments/:filename', (req, res) => {
+  try {
+    const filePath = attachmentServer.getAttachmentPath(req.params.filename);
+    if (filePath) {
+      res.sendFile(filePath);
+    } else {
+      res.status(404).json({ error: 'Attachment not found' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Serve attachment by full path (encoded)
+app.get('/api/attachment-by-path', (req, res) => {
+  try {
+    const filePath = req.query.path;
+    if (!filePath) return res.status(400).json({ error: 'Path required' });
+
+    const resolved = attachmentServer.resolveAttachmentPath(filePath);
+    if (resolved) {
+      res.sendFile(resolved);
+    } else {
+      res.status(404).json({ error: 'Attachment not found' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get server info
+app.get('/api/info', (req, res) => {
+  const interfaces = os.networkInterfaces();
+  const addresses = [];
+  for (const iface of Object.values(interfaces)) {
+    for (const addr of iface) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        addresses.push(addr.address);
+      }
+    }
+  }
+  res.json({
+    hostname: os.hostname(),
+    addresses,
+    platform: os.platform(),
+    uptime: process.uptime()
+  });
+});
+
+// ─── WEBSOCKET FOR REAL-TIME UPDATES ───
+
+io.on('connection', (socket) => {
+  console.log(`[WS] Client connected: ${socket.id}`);
+
+  socket.on('disconnect', () => {
+    console.log(`[WS] Client disconnected: ${socket.id}`);
+  });
+});
+
+// Poll for new messages every 2 seconds
+let lastMessageRowId = messageDB.getLastRowId();
+
+setInterval(() => {
+  try {
+    const newMessages = messageDB.getNewMessages(lastMessageRowId);
+    if (newMessages.length > 0) {
+      lastMessageRowId = newMessages[newMessages.length - 1].rowid;
+      io.emit('new-messages', newMessages);
+      console.log(`[WS] Broadcast ${newMessages.length} new message(s)`);
+    }
+  } catch (err) {
+    // DB might be locked momentarily
+  }
+}, 2000);
+
+// ─── START SERVER ───
+
+const PORT = process.env.PORT || 3782;
+
+server.listen(PORT, '0.0.0.0', () => {
+  const interfaces = os.networkInterfaces();
+  console.log('\n=== iMessage Bridge Server ===');
+  console.log(`Local:   http://localhost:${PORT}`);
+  for (const [name, iface] of Object.entries(interfaces)) {
+    for (const addr of iface) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        console.log(`Network: http://${addr.address}:${PORT}`);
+      }
+    }
+  }
+  console.log('\nWaiting for Windows client connections...\n');
+});

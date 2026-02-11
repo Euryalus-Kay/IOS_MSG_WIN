@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iMessage</title>
+  <link rel="stylesheet" href="styles/app.css">
+</head>
+<body>
+  <!-- Connection Setup Screen -->
+  <div id="setup-screen" class="setup-screen">
+    <div class="setup-card">
+      <div class="setup-icon">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+          <rect width="64" height="64" rx="14" fill="#34C759"/>
+          <path d="M32 16C23.2 16 16 22.1 16 29.6C16 33.8 18.2 37.5 21.6 39.9L20 47L27.4 43.5C28.9 43.8 30.4 44 32 44C40.8 44 48 37.9 48 30.4C48 22.1 40.8 16 32 16Z" fill="white"/>
+        </svg>
+      </div>
+      <h1>iMessage for Windows</h1>
+      <p class="setup-subtitle">Connect to your Mac to access your messages</p>
+
+      <div class="setup-form">
+        <label>Mac Server Address</label>
+        <input type="text" id="server-url-input" placeholder="http://192.168.1.xxx:3782" spellcheck="false">
+        <p class="setup-hint">Run the server on your Mac, then enter its network address here</p>
+        <button id="connect-btn" class="btn-primary">Connect</button>
+        <p id="connection-error" class="error-text" style="display:none"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div id="main-app" class="main-app" style="display:none">
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <div class="drag-region"></div>
+        <div class="sidebar-title">
+          <h2>Messages</h2>
+          <button id="settings-btn" class="icon-btn" title="Settings">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 6a2 2 0 110-4 2 2 0 010 4zm0 6a2 2 0 110-4 2 2 0 010 4zm0 6a2 2 0 110-4 2 2 0 010 4z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="search-bar">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="#8e8e93">
+            <path d="M11.7 10.3l3.1 3.1c.4.4.4 1 0 1.4-.4.4-1 .4-1.4 0l-3.1-3.1C9.3 12.5 8.2 13 7 13c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6c0 1.2-.5 2.3-1.3 3.3zM7 11c2.2 0 4-1.8 4-4s-1.8-4-4-4-4 1.8-4 4 1.8 4 4 4z"/>
+          </svg>
+          <input type="text" id="search-input" placeholder="Search">
+        </div>
+      </div>
+      <div id="conversation-list" class="conversation-list"></div>
+    </div>
+
+    <!-- Chat Area -->
+    <div class="chat-area">
+      <!-- No conversation selected -->
+      <div id="no-chat" class="no-chat">
+        <div class="no-chat-icon">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="#c7c7cc">
+            <path d="M24 4C12.96 4 4 11.64 4 21.2C4 26.6 6.64 31.4 11.2 34.8L8 44L17.6 39.6C19.6 40.2 21.8 40.4 24 40.4C35.04 40.4 44 32.76 44 23.2C44 11.64 35.04 4 24 4Z"/>
+          </svg>
+        </div>
+        <p>Select a conversation to start messaging</p>
+      </div>
+
+      <!-- Active chat -->
+      <div id="active-chat" class="active-chat" style="display:none">
+        <div class="chat-header">
+          <div class="chat-header-info">
+            <div class="chat-avatar" id="chat-avatar">
+              <span id="chat-avatar-text"></span>
+            </div>
+            <div class="chat-header-text">
+              <h3 id="chat-name"></h3>
+              <p id="chat-subtitle" class="chat-subtitle"></p>
+            </div>
+          </div>
+          <div class="chat-header-actions">
+            <button id="chat-info-btn" class="icon-btn" title="Info">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10 2a8 8 0 100 16 8 8 0 000-16zm0 3a1 1 0 110 2 1 1 0 010-2zm1 4v5a1 1 0 11-2 0V9a1 1 0 112 0z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div id="messages-container" class="messages-container">
+          <div id="messages-list" class="messages-list"></div>
+        </div>
+
+        <div class="message-input-area">
+          <div class="message-input-wrapper">
+            <textarea id="message-input" placeholder="iMessage" rows="1"></textarea>
+            <button id="send-btn" class="send-btn" disabled>
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="white">
+                <path d="M2.93 17.07A10 10 0 1117.07 2.93 10 10 0 012.93 17.07zM9 5v5.59L6.71 8.29a1 1 0 00-1.42 1.42l4 4a1 1 0 001.42 0l4-4a1 1 0 10-1.42-1.42L11 10.59V5a1 1 0 00-2 0z" transform="rotate(-90 10 10)"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Info Panel -->
+      <div id="info-panel" class="info-panel" style="display:none">
+        <div class="info-panel-header">
+          <button id="close-info-btn" class="icon-btn">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"/>
+            </svg>
+          </button>
+          <h3>Details</h3>
+        </div>
+        <div id="info-panel-content" class="info-panel-content"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal" style="display:none">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <h3>Settings</h3>
+      <div class="settings-form">
+        <label>Server Address</label>
+        <input type="text" id="settings-server-url" spellcheck="false">
+        <div class="settings-actions">
+          <button id="settings-save" class="btn-primary">Save & Reconnect</button>
+          <button id="settings-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>
+      <div id="server-info" class="server-info"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

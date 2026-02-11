@@ -1,0 +1,17 @@
+{
+  "name": "imessage-bridge-server",
+  "version": "1.0.0",
+  "description": "Mac server that reads iMessage database and serves it over a local network API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --dev"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "socket.io": "^4.8.0",
+    "chokidar": "^4.0.0"
+  }
+}
