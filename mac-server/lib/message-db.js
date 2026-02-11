@@ -216,6 +216,65 @@ class MessageDB {
     return result ? result.maxId : 0;
   }
 
+  // Get tapback reactions for messages in a chat
+  getReactionsForChat(chatId) {
+    const stmt = this.db.prepare(`
+      SELECT
+        m.associated_message_guid,
+        m.associated_message_type,
+        m.is_from_me,
+        h.id as sender_id
+      FROM message m
+      JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+      LEFT JOIN handle h ON h.ROWID = m.handle_id
+      WHERE cmj.chat_id = ?
+        AND m.associated_message_type IS NOT NULL
+        AND m.associated_message_type != 0
+    `);
+
+    const rows = stmt.all(chatId);
+    const reactionMap = {};
+
+    for (const row of rows) {
+      const guid = row.associated_message_guid;
+      if (!guid) continue;
+
+      // Clean up the GUID - remove the "p:X/" prefix if present
+      const cleanGuid = guid.replace(/^p:\d+\//, '').replace(/^bp:/, '');
+
+      if (!reactionMap[cleanGuid]) reactionMap[cleanGuid] = [];
+
+      const type = row.associated_message_type;
+      const isRemoval = type >= 3000 && type <= 3005;
+      const reactionType = type >= 3000 ? type - 1000 : type;
+
+      const REACTION_EMOJIS = {
+        2000: '\u2764\uFE0F',
+        2001: '\uD83D\uDC4D',
+        2002: '\uD83D\uDC4E',
+        2003: '\uD83D\uDE02',
+        2004: '\u2757\u2757',
+        2005: '\u2753'
+      };
+
+      if (isRemoval) {
+        const idx = reactionMap[cleanGuid].findIndex(
+          r => r.type === reactionType && r.senderId === (row.sender_id || (row.is_from_me ? '__me__' : null))
+        );
+        if (idx !== -1) reactionMap[cleanGuid].splice(idx, 1);
+      } else {
+        reactionMap[cleanGuid].push({
+          type: reactionType,
+          emoji: REACTION_EMOJIS[reactionType] || '\u2764\uFE0F',
+          senderId: row.sender_id || (row.is_from_me ? '__me__' : null),
+          isFromMe: row.is_from_me === 1
+        });
+      }
+    }
+
+    return reactionMap;
+  }
+
   // Format a message row into a clean object
   formatMessage(row) {
     const attachments = [];

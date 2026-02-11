@@ -4,6 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { MessageDB } = require('./lib/message-db');
 const { ContactsManager } = require('./lib/contacts');
 const { AppleScriptSender } = require('./lib/sender');
@@ -17,6 +18,11 @@ const io = new Server(server, {
 
 app.use(cors());
 app.use(express.json());
+
+// ─── CONNECTION CODE SYSTEM ───
+// Generate a simple 6-digit connection code
+const CONNECTION_CODE = crypto.randomInt(100000, 999999).toString();
+console.log(`\n[CONNECTION CODE] ${CONNECTION_CODE}\n`);
 
 const DB_PATH = path.join(os.homedir(), 'Library', 'Messages', 'chat.db');
 const ATTACHMENTS_BASE = path.join(os.homedir(), 'Library', 'Messages', 'Attachments');
@@ -146,6 +152,26 @@ app.get('/api/attachment-by-path', (req, res) => {
   }
 });
 
+// Get reactions for a conversation
+app.get('/api/conversations/:chatId/reactions', (req, res) => {
+  try {
+    const reactions = messageDB.getReactionsForChat(req.params.chatId);
+    res.json(reactions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify connection code
+app.post('/api/verify-code', (req, res) => {
+  const { code } = req.body;
+  if (code === CONNECTION_CODE) {
+    res.json({ success: true, serverName: os.hostname() });
+  } else {
+    res.status(401).json({ error: 'Invalid connection code' });
+  }
+});
+
 // Get server info
 app.get('/api/info', (req, res) => {
   const interfaces = os.networkInterfaces();
@@ -161,7 +187,8 @@ app.get('/api/info', (req, res) => {
     hostname: os.hostname(),
     addresses,
     platform: os.platform(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    connectionCode: CONNECTION_CODE
   });
 });
 

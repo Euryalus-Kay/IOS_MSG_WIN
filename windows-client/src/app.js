@@ -11,6 +11,7 @@ const state = {
   messages: [],
   contacts: [],
   contactMap: {},
+  reactions: {},
   searchTimeout: null,
   isConnected: false
 };
@@ -60,7 +61,6 @@ function getAvatarColor(name) {
 
 function getInitials(name) {
   if (!name) return '?';
-  // If it looks like a phone number, show last 2 digits
   if (/^[\d+\s()-]+$/.test(name) && name.replace(/\D/g, '').length >= 7) {
     const digits = name.replace(/\D/g, '');
     return digits.slice(-2);
@@ -116,6 +116,29 @@ function formatDateSeparator(isoDate) {
   return date.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 }
 
+// ─── URL/LINK DETECTION ───
+const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
+
+function extractUrls(text) {
+  if (!text) return [];
+  const matches = text.match(URL_REGEX);
+  return matches || [];
+}
+
+function linkifyText(text) {
+  if (!text) return '';
+  return escapeHtml(text).replace(
+    /https?:\/\/[^\s<>&"{}|\\^`\[\]]+/gi,
+    match => `<a href="#" class="message-link" data-url="${match}">${match}</a>`
+  );
+}
+
+function getDomain(url) {
+  try {
+    return new URL(url).hostname.replace('www.', '');
+  } catch { return url; }
+}
+
 // ─── API ───
 async function apiFetch(endpoint) {
   const res = await fetch(`${state.serverUrl}${endpoint}`);
@@ -136,12 +159,87 @@ async function apiPost(endpoint, body) {
   return res.json();
 }
 
+// ─── SAVED CONNECTIONS ───
+function getSavedConnections() {
+  try {
+    const saved = localStorage.getItem('savedConnections');
+    return saved ? JSON.parse(saved) : [];
+  } catch { return []; }
+}
+
+function saveConnection(url, name) {
+  const connections = getSavedConnections();
+  const existing = connections.findIndex(c => c.url === url);
+  if (existing !== -1) {
+    connections[existing].name = name;
+    connections[existing].lastUsed = Date.now();
+  } else {
+    connections.push({ url, name, lastUsed: Date.now() });
+  }
+  localStorage.setItem('savedConnections', JSON.stringify(connections));
+  renderSavedConnections();
+}
+
+function removeSavedConnection(url) {
+  const connections = getSavedConnections().filter(c => c.url !== url);
+  localStorage.setItem('savedConnections', JSON.stringify(connections));
+  renderSavedConnections();
+}
+
+function renderSavedConnections() {
+  const container = $('#saved-connections-list');
+  if (!container) return;
+  const connections = getSavedConnections();
+
+  if (connections.length === 0) {
+    container.parentElement.style.display = 'none';
+    return;
+  }
+
+  container.parentElement.style.display = 'block';
+  container.innerHTML = '';
+
+  for (const conn of connections.sort((a, b) => b.lastUsed - a.lastUsed)) {
+    const item = document.createElement('div');
+    item.className = 'saved-connection-item';
+    item.innerHTML = `
+      <div class="conn-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
+      </div>
+      <div class="conn-info">
+        <div class="conn-name">${escapeHtml(conn.name || 'Mac Server')}</div>
+        <div class="conn-url">${escapeHtml(conn.url)}</div>
+      </div>
+      <button class="conn-delete" title="Remove">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    `;
+
+    item.querySelector('.conn-info').addEventListener('click', () => {
+      serverUrlInput.value = conn.url;
+      connectBtn.click();
+    });
+
+    item.querySelector('.conn-delete').addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeSavedConnection(conn.url);
+    });
+
+    container.appendChild(item);
+  }
+}
+
 // ─── CONNECTION ───
 async function connectToServer(url) {
   state.serverUrl = url.replace(/\/$/, '');
 
   const info = await apiFetch('/api/info');
   console.log('Connected to server:', info);
+
+  // Save the connection
+  saveConnection(state.serverUrl, info.hostname);
 
   await ipcRenderer.invoke('set-server-url', state.serverUrl);
 
@@ -257,7 +355,6 @@ function renderConversationList(conversations) {
       previewText = 'You: ' + previewText;
     }
 
-    // Group icon SVG for group chats
     const avatarContent = conv.isGroup
       ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="white" opacity="0.9"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`
       : getInitials(displayName);
@@ -315,9 +412,14 @@ async function openConversation(conv) {
   messagesList.innerHTML = '<div style="display:flex;justify-content:center;padding:40px;"><div class="loading-spinner"></div></div>';
 
   try {
-    const messages = await apiFetch(`/api/conversations/${conv.chatId}/messages?limit=100`);
+    // Load messages and reactions in parallel
+    const [messages, reactions] = await Promise.all([
+      apiFetch(`/api/conversations/${conv.chatId}/messages?limit=100`),
+      apiFetch(`/api/conversations/${conv.chatId}/reactions`).catch(() => ({}))
+    ]);
     state.messages = messages;
-    renderMessages(messages, conv.isGroup);
+    state.reactions = reactions;
+    renderMessages(messages, conv.isGroup, reactions);
     scrollToBottom(false);
   } catch (err) {
     console.error('Failed to load messages:', err);
@@ -328,7 +430,7 @@ async function openConversation(conv) {
 }
 
 // ─── RENDER MESSAGES ───
-function renderMessages(messages, isGroup) {
+function renderMessages(messages, isGroup, reactions = {}) {
   messagesList.innerHTML = '';
   let lastDate = null;
   let lastSenderId = null;
@@ -359,7 +461,7 @@ function renderMessages(messages, isGroup) {
       continue;
     }
 
-    // Skip tapback/reaction messages
+    // Skip tapback/reaction messages (they are rendered as badges)
     if (msg.associatedMessageType && msg.associatedMessageType !== 0) continue;
     if (!msg.text && msg.attachments.length === 0) continue;
 
@@ -378,15 +480,34 @@ function renderMessages(messages, isGroup) {
       row.appendChild(senderEl);
     }
 
-    // Message bubble
+    // Message bubble with link detection
     if (msg.text) {
       const bubble = document.createElement('div');
       bubble.className = 'message-bubble';
-      bubble.textContent = msg.text;
+      const urls = extractUrls(msg.text);
+      if (urls.length > 0) {
+        bubble.innerHTML = linkifyText(msg.text);
+        // Add click handlers for links
+        bubble.querySelectorAll('.message-link').forEach(link => {
+          link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const url = link.getAttribute('data-url');
+            require('electron').shell.openExternal(url);
+          });
+        });
+      } else {
+        bubble.textContent = msg.text;
+      }
       row.appendChild(bubble);
+
+      // Render link preview for the first URL
+      if (urls.length > 0) {
+        const linkPreview = createLinkPreview(urls[0]);
+        row.appendChild(linkPreview);
+      }
     }
 
-    // Attachments
+    // Attachments - improved handling
     for (const att of msg.attachments) {
       const attEl = document.createElement('div');
       attEl.className = 'message-attachment';
@@ -397,21 +518,52 @@ function renderMessages(messages, isGroup) {
         img.alt = att.transferName;
         img.loading = 'lazy';
         img.onerror = () => { img.style.display = 'none'; };
+        img.addEventListener('click', () => {
+          require('electron').shell.openExternal(img.src);
+        });
         attEl.appendChild(img);
+      } else if (att.mimeType && att.mimeType.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.src = `${state.serverUrl}/api/attachment-by-path?path=${encodeURIComponent(att.filename)}`;
+        video.controls = true;
+        video.preload = 'metadata';
+        video.onerror = () => { video.style.display = 'none'; };
+        attEl.appendChild(video);
+      } else if (att.mimeType && att.mimeType.startsWith('audio/')) {
+        const audio = document.createElement('audio');
+        audio.src = `${state.serverUrl}/api/attachment-by-path?path=${encodeURIComponent(att.filename)}`;
+        audio.controls = true;
+        audio.preload = 'metadata';
+        attEl.appendChild(audio);
       } else {
+        // Generic file attachment with better icon
+        const fileExt = (att.transferName || '').split('.').pop().toLowerCase();
+        const fileIcon = getFileIcon(fileExt);
         attEl.innerHTML = `
-          <div class="attachment-file">
-            <div class="attachment-file-icon">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+          <div class="attachment-file" title="${escapeHtml(att.transferName || 'File')}">
+            <div class="attachment-file-icon" style="background:${fileIcon.color}">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="${fileIcon.path}"/></svg>
             </div>
             <span>${escapeHtml(att.transferName || 'File')}</span>
           </div>
         `;
+        attEl.querySelector('.attachment-file').addEventListener('click', () => {
+          require('electron').shell.openExternal(
+            `${state.serverUrl}/api/attachment-by-path?path=${encodeURIComponent(att.filename)}`
+          );
+        });
       }
       row.appendChild(attEl);
     }
 
-    // Metadata (time + delivery status) — shown on hover or last message
+    // Tapback reactions
+    const msgReactions = reactions[msg.guid] || [];
+    if (msgReactions.length > 0) {
+      const reactionsEl = createReactionsElement(msgReactions);
+      row.appendChild(reactionsEl);
+    }
+
+    // Metadata (time + delivery status)
     const isLastMsg = i === messages.length - 1;
     const nextIsDifferentSender = !nextMsg || (nextMsg.isFromMe !== msg.isFromMe);
 
@@ -423,7 +575,6 @@ function renderMessages(messages, isGroup) {
     timeSpan.textContent = formatMessageTime(msg.date);
     meta.appendChild(timeSpan);
 
-    // Delivery / read status for sent messages
     if (msg.isFromMe && (isLastMsg || nextIsDifferentSender)) {
       const statusSpan = document.createElement('span');
       if (msg.dateRead) {
@@ -445,6 +596,69 @@ function renderMessages(messages, isGroup) {
     lastSenderId = currentSenderId;
     lastIsFromMe = msg.isFromMe;
   }
+}
+
+// ─── REACTION BADGES ───
+function createReactionsElement(reactions) {
+  const container = document.createElement('div');
+  container.className = 'message-reactions';
+
+  // Group by emoji type
+  const grouped = {};
+  for (const r of reactions) {
+    if (!grouped[r.emoji]) grouped[r.emoji] = [];
+    grouped[r.emoji].push(r);
+  }
+
+  for (const [emoji, reactors] of Object.entries(grouped)) {
+    const badge = document.createElement('span');
+    badge.className = 'reaction-badge';
+    badge.innerHTML = `${emoji}${reactors.length > 1 ? `<span class="reaction-count">${reactors.length}</span>` : ''}`;
+    badge.title = reactors.map(r => {
+      if (r.isFromMe) return 'You';
+      return resolveContactName(r.senderId) || formatPhoneNumber(r.senderId) || 'Someone';
+    }).join(', ');
+    container.appendChild(badge);
+  }
+
+  return container;
+}
+
+// ─── LINK PREVIEW ───
+function createLinkPreview(url) {
+  const preview = document.createElement('a');
+  preview.className = 'link-preview';
+  preview.href = '#';
+  preview.addEventListener('click', (e) => {
+    e.preventDefault();
+    require('electron').shell.openExternal(url);
+  });
+
+  const domain = getDomain(url);
+
+  preview.innerHTML = `
+    <div class="link-preview-body">
+      <div class="link-preview-domain">${escapeHtml(domain)}</div>
+      <div class="link-preview-title">${escapeHtml(url)}</div>
+    </div>
+  `;
+
+  return preview;
+}
+
+// ─── FILE ICON HELPER ───
+function getFileIcon(ext) {
+  const icons = {
+    pdf: { color: '#FF3B30', path: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z' },
+    doc: { color: '#007AFF', path: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z' },
+    docx: { color: '#007AFF', path: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z' },
+    xls: { color: '#34C759', path: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z' },
+    xlsx: { color: '#34C759', path: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z' },
+    zip: { color: '#AF52DE', path: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z' },
+    mp3: { color: '#FF9500', path: 'M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z' },
+    wav: { color: '#FF9500', path: 'M12 3v9.28c-.47-.17-.97-.28-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z' },
+  };
+  return icons[ext] || { color: 'var(--accent)', path: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z' };
 }
 
 function scrollToBottom(smooth = true) {
@@ -505,8 +719,22 @@ function appendMessageToView(msg, isGroup) {
   if (msg.text) {
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
-    bubble.textContent = msg.text;
-    row.appendChild(bubble);
+    const urls = extractUrls(msg.text);
+    if (urls.length > 0) {
+      bubble.innerHTML = linkifyText(msg.text);
+      bubble.querySelectorAll('.message-link').forEach(link => {
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          require('electron').shell.openExternal(link.getAttribute('data-url'));
+        });
+      });
+      const linkPreview = createLinkPreview(urls[0]);
+      row.appendChild(bubble);
+      row.appendChild(linkPreview);
+    } else {
+      bubble.textContent = msg.text;
+      row.appendChild(bubble);
+    }
   }
 
   if (msg.attachments) {
@@ -518,8 +746,19 @@ function appendMessageToView(msg, isGroup) {
         img.src = `${state.serverUrl}/api/attachment-by-path?path=${encodeURIComponent(att.filename)}`;
         img.alt = att.transferName;
         attEl.appendChild(img);
+      } else if (att.mimeType && att.mimeType.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.src = `${state.serverUrl}/api/attachment-by-path?path=${encodeURIComponent(att.filename)}`;
+        video.controls = true;
+        video.preload = 'metadata';
+        attEl.appendChild(video);
+      } else if (att.mimeType && att.mimeType.startsWith('audio/')) {
+        const audio = document.createElement('audio');
+        audio.src = `${state.serverUrl}/api/attachment-by-path?path=${encodeURIComponent(att.filename)}`;
+        audio.controls = true;
+        attEl.appendChild(audio);
       } else {
-        attEl.innerHTML = `<div class="attachment-file"><span>${escapeHtml(att.transferName || 'File')}</span></div>`;
+        attEl.innerHTML = `<div class="attachment-file"><div class="attachment-file-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg></div><span>${escapeHtml(att.transferName || 'File')}</span></div>`;
       }
       row.appendChild(attEl);
     }
@@ -550,7 +789,6 @@ async function sendMessage() {
 
   const conv = state.currentChat;
 
-  // Optimistic UI: show message immediately
   const tempMsg = {
     text,
     date: new Date().toISOString(),
@@ -583,7 +821,6 @@ async function sendMessage() {
     console.error('Failed to send:', err);
     messageInput.value = text;
     autoResizeTextarea();
-    // Flash the input red briefly
     const wrapper = messageInput.closest('.message-input-wrapper');
     wrapper.style.borderColor = 'var(--red)';
     wrapper.style.boxShadow = '0 0 0 3px rgba(255,59,48,0.2)';
@@ -594,7 +831,7 @@ async function sendMessage() {
   }
 }
 
-// ─── SEARCH ───
+// ─── SEARCH (with contact name support) ───
 async function handleSearch(query) {
   if (!query.trim()) {
     renderConversationList(state.conversations);
@@ -602,10 +839,22 @@ async function handleSearch(query) {
   }
 
   const q = query.toLowerCase();
+
+  // Search conversations by display name (which includes resolved contact names)
   const filtered = state.conversations.filter(conv => {
     const name = getDisplayName(conv).toLowerCase();
     const preview = (conv.lastMessage.text || '').toLowerCase();
-    return name.includes(q) || preview.includes(q);
+    const chatId = (conv.chatIdentifier || '').toLowerCase();
+
+    // Also search individual participant contact names
+    if (conv.participants) {
+      for (const p of conv.participants) {
+        const contactName = resolveContactName(p);
+        if (contactName && contactName.toLowerCase().includes(q)) return true;
+      }
+    }
+
+    return name.includes(q) || preview.includes(q) || chatId.includes(q);
   });
 
   if (filtered.length > 0) {
@@ -672,7 +921,6 @@ async function showInfoPanel() {
 
     infoPanelContent.innerHTML = '';
 
-    // Profile header
     const profile = document.createElement('div');
     profile.className = 'info-profile';
 
@@ -691,7 +939,6 @@ async function showInfoPanel() {
     `;
     infoPanelContent.appendChild(profile);
 
-    // Participants section
     if (details.participants.length > 0) {
       const section = document.createElement('div');
       section.className = 'info-section';
@@ -716,7 +963,6 @@ async function showInfoPanel() {
       infoPanelContent.appendChild(section);
     }
 
-    // Details section
     const detailSection = document.createElement('div');
     detailSection.className = 'info-section';
     detailSection.innerHTML = `
@@ -794,7 +1040,6 @@ searchInput.addEventListener('input', (e) => {
   state.searchTimeout = setTimeout(() => handleSearch(e.target.value), 250);
 });
 
-// Escape to clear search
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     searchInput.value = '';
@@ -823,6 +1068,7 @@ settingsBtn.addEventListener('click', () => {
     serverInfo.innerHTML = `
       <p><strong>Host:</strong> ${info.hostname}</p>
       <p><strong>Network:</strong> ${info.addresses.join(', ')}</p>
+      <p><strong>Connection Code:</strong> <span style="font-family:var(--font-mono);font-weight:700;color:var(--accent)">${info.connectionCode || 'N/A'}</span></p>
       <p><strong>Uptime:</strong> ${Math.floor(info.uptime / 60)}m ${Math.floor(info.uptime % 60)}s</p>
     `;
   }).catch(() => {
@@ -849,7 +1095,6 @@ document.querySelector('.modal-overlay')?.addEventListener('click', () => {
   settingsModal.style.display = 'none';
 });
 
-// Escape to close modal
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (settingsModal.style.display !== 'none') {
@@ -879,6 +1124,9 @@ closeInfoBtn.addEventListener('click', () => {
 
 // ─── INIT ───
 async function init() {
+  // Render saved connections on setup screen
+  renderSavedConnections();
+
   try {
     const savedUrl = await ipcRenderer.invoke('get-server-url');
     if (savedUrl && savedUrl !== 'http://localhost:3782') {
