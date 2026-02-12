@@ -45,24 +45,105 @@ try {
   process.exit(1);
 }
 
+// ─── CONTACT LOOKUP HELPERS ───
+function buildContactLookup(contacts) {
+  const map = {};
+  for (const contact of contacts) {
+    if (!contact.name) continue;
+    for (const phone of contact.phones) {
+      const digits = phone.replace(/\D/g, '');
+      if (digits.length >= 7) {
+        map[digits] = contact.name;
+        map[digits.slice(-10)] = contact.name;
+        map[digits.slice(-7)] = contact.name;
+      }
+      // Also store with + prefix as-is (for exact match)
+      const cleaned = phone.replace(/[\s()-]/g, '');
+      map[cleaned] = contact.name;
+    }
+    for (const email of contact.emails) {
+      map[email.toLowerCase()] = contact.name;
+    }
+  }
+  return map;
+}
+
+function lookupName(identifier, lookup) {
+  if (!identifier) return null;
+
+  // Exact match (for emails and already-clean numbers)
+  const lower = identifier.toLowerCase();
+  if (lookup[lower]) return lookup[lower];
+
+  // Cleaned phone (strip spaces, dashes, parens)
+  const cleaned = identifier.replace(/[\s()-]/g, '');
+  if (lookup[cleaned]) return lookup[cleaned];
+
+  // Digits only
+  const digits = identifier.replace(/\D/g, '');
+  if (lookup[digits]) return lookup[digits];
+
+  // Last 10 digits
+  const last10 = digits.slice(-10);
+  if (last10.length >= 7 && lookup[last10]) return lookup[last10];
+
+  // Last 7 digits
+  const last7 = digits.slice(-7);
+  if (last7.length === 7 && lookup[last7]) return lookup[last7];
+
+  return null;
+}
+
 // ─── REST API ROUTES ───
 
-// Get all conversations
-app.get('/api/conversations', (req, res) => {
+// Get all conversations (with server-side contact name resolution)
+app.get('/api/conversations', async (req, res) => {
   try {
     const conversations = messageDB.getConversations();
+    // Resolve contact names server-side
+    const contacts = await contactsManager.getContacts();
+    const contactLookup = buildContactLookup(contacts);
+
+    for (const conv of conversations) {
+      // Resolve display name from contacts
+      if (!conv.isGroup && conv.chatIdentifier) {
+        const resolved = lookupName(conv.chatIdentifier, contactLookup);
+        if (resolved) {
+          conv.displayName = resolved;
+        }
+      }
+      // Resolve participant names
+      if (conv.participants) {
+        conv.participantNames = conv.participants.map(p => lookupName(p, contactLookup) || p);
+      }
+    }
+
     res.json(conversations);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get messages for a conversation
-app.get('/api/conversations/:chatId/messages', (req, res) => {
+// Get messages for a conversation (with resolved sender names)
+app.get('/api/conversations/:chatId/messages', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
     const offset = parseInt(req.query.offset) || 0;
     const messages = messageDB.getMessages(req.params.chatId, limit, offset);
+
+    // Resolve sender names for group chats
+    const contacts = await contactsManager.getContacts();
+    const contactLookup = buildContactLookup(contacts);
+
+    for (const msg of messages) {
+      if (msg.senderId && !msg.isFromMe) {
+        const resolved = lookupName(msg.senderId, contactLookup);
+        if (resolved) {
+          msg.senderDisplay = resolved;
+        }
+      }
+    }
+
     res.json(messages);
   } catch (err) {
     res.status(500).json({ error: err.message });
